@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"Blog-API/internal/infrastructure/database"
@@ -21,7 +22,7 @@ type BlogRepo struct {
 }
 
 // CORRECTED: The constructor now returns the interface type and takes the standard *mongo.Database.
-func NewBlogRepository(db *database.MongoDB) domain.BlogRepository {
+func NewBlogRepository(db *database.MongoDB) *BlogRepo {
 	// CORRECTED: Collection names are conventionally lowercase.
 	collection := db.GetCollection("blogs")
 	return &BlogRepo{db: db, collection: collection}
@@ -199,50 +200,238 @@ func (br *BlogRepo) SearchByAuthor(author string, page, limit int) ([]*domain.Bl
 // --- ADDED STUB IMPLEMENTATIONS FOR ALL MISSING METHODS ---
 // These are required for the code to compile. They return empty data.
 
-func (br *BlogRepo) FilterByTags(tags []string, page, limit int) ([]*domain.Blog, int64, error) {
-	return []*domain.Blog{}, 0, nil
+func (Br *BlogRepo) FilterByTags(tags []string, page, limit int) ([]*domain.Blog, int64, error){
+	ctx , cancle := context.WithTimeout(context.Background(), 5 * time.Second)
+	defer cancle()
+	sort := bson.D{{"title",1}}
+	opt := options.Find().SetSort(sort)
+	opt.SetLimit(int64(limit))	
+	opt.SetSkip( int64(page - 1) * int64(limit))
+
+	filter := bson.D{{"tags",bson.D{{"$in",tags}}}}
+	var blogs []*domain.Blog
+
+	curr, err := Br.collection.Find(ctx,filter,opt)
+	if err != nil {
+		log.Println("Find error:", err)
+		return nil, 0, err
+	}
+
+	if err := curr.All(ctx,&blogs); err != nil{
+		log.Println("Find error:", err)
+		return nil, 0, err
+	}
+
+	total, err := Br.collection.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return blogs,total,nil
+
+
+}
+func  (Br *BlogRepo)FilterByDate(startDate, endDate time.Time, page, limit int) ([]*domain.Blog, int64, error){
+
+	ctx , cancle := context.WithTimeout(context.Background(), 5 * time.Second)
+	defer cancle()
+	
+	sort := bson.D{{"title",1}}
+	opt := options.Find().SetSort(sort)
+	opt.SetLimit(int64(limit))	
+	opt.SetSkip( int64(page - 1) * int64(limit))
+
+	filter := bson.D{{"created_at", bson.D{{"$gte", startDate},{"$lte", endDate},}},}
+
+	var blogs []*domain.Blog
+
+	curr, err := Br.collection.Find(ctx,filter,opt)
+	if err != nil {
+		log.Println("Find error:", err)
+		return nil, 0, err
+	}
+
+	if err := curr.All(ctx,&blogs); err != nil{
+		log.Println("Find error:", err)
+		return nil, 0, err
+	}
+
+	total, err := Br.collection.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return blogs,total,nil
 }
 
-func (br *BlogRepo) FilterByDate(startDate, endDate time.Time, page, limit int) ([]*domain.Blog, int64, error) {
-	return []*domain.Blog{}, 0, nil
+func (Br *BlogRepo) GetPopular(limit int) ([]*domain.Blog, error){
+
+	ctx , cancle := context.WithTimeout(context.Background(), 5 * time.Second)
+	defer cancle()
+	
+	sort := bson.D{{"view_count",1}}
+	opt := options.Find().SetSort(sort)
+	opt.SetLimit(int64(limit))		
+
+	var blogs []*domain.Blog
+
+	curr, err := Br.collection.Find(ctx,bson.D{{}},opt)
+	if err != nil {
+		log.Println("Find error:", err)
+		return nil,  err
+	}
+
+	if err := curr.All(ctx,&blogs); err != nil{
+		log.Println("Find error:", err)
+		return nil,  err
+	}
+
+	
+	return blogs,nil
+
+
+
 }
 
-func (br *BlogRepo) GetPopular(limit int) ([]*domain.Blog, error) {
-	return []*domain.Blog{}, nil
-}
 
-func (br *BlogRepo) IncrementViewCount(id primitive.ObjectID) error {
+
+func (Br *BlogRepo) IncrementViewCount(id primitive.ObjectID) error{
+	ctx, cancle := context.WithTimeout(context.Background(), 5 * time.Second)
+	defer cancle()
+
+	_, err := Br.collection.UpdateOne(ctx,bson.D{{"_id",id}},bson.D{{"$inc",bson.D{{"view_count", 1}}}})
+
+	if err != nil{
+		return  err
+	}
+	return  nil
+
+}
+func (Br *BlogRepo) AddComment(blogID primitive.ObjectID, comment *domain.Comment) error{
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Set creation and update time
+	comment.ID = primitive.NewObjectID()
+	comment.CreatedAt = time.Now()
+	comment.UpdatedAt = time.Now()
+
+	update := bson.D{
+		{"$push", bson.D{
+			{"comments", comment},
+		}},
+		{"$inc", bson.D{
+			{"comment_count", 1}, // Optional: increment comment count
+		}},
+	}
+
+	_, err := Br.collection.UpdateOne(ctx, bson.M{"_id": blogID}, update)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
+func (Br *BlogRepo)DeleteComment(blogID, commentID primitive.ObjectID) error{
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-func (br *BlogRepo) AddComment(blogID primitive.ObjectID, comment *domain.Comment) error {
+	update := bson.D{
+		{"$pull",bson.D{{"comments",bson.D{{"_id",commentID}}}}},
+		{"$inc",bson.D{{"comment_count",-1}}},
+	}
+
+	filter := bson.D{{"_id",blogID}}
+
+	_,err := Br.collection.UpdateOne(ctx,filter,update)
+
+	if err != nil{
+		return  err
+	}
+
 	return nil
+
 }
 
-func (br *BlogRepo) DeleteComment(blogID, commentID primitive.ObjectID) error {
+func (Br *BlogRepo) UpdateComment(blogID, commentID primitive.ObjectID, content string) error{
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+
+	filter := bson.D{
+		{"_id", blogID},
+		{"comments._id", commentID},
+	}
+
+	
+	update := bson.D{
+		{"$set", bson.D{
+			{"comments.$.content", content},
+			{"comments.$.updated_at", time.Now()},
+		}},
+	}
+
+	result, err := Br.collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return err
+	}
+
+	if result.ModifiedCount == 0 {
+		return fmt.Errorf("no comment updated — check comment ID")
+	}
+
 	return nil
-}
 
-func (br *BlogRepo) UpdateComment(blogID, commentID primitive.ObjectID, content string) error {
-	return nil
+	
 }
+func (Br *BlogRepo)AddLike(blogID primitive.ObjectID, userID string) error{
+	ctx, cancle := context.WithTimeout(context.Background(), 5 * time.Second)
+	defer cancle()
 
-func (br *BlogRepo) AddLike(blogID primitive.ObjectID, userID string) error {
-	return nil
-}
+	_, err := Br.collection.UpdateOne(ctx,bson.D{{"_id",blogID}},bson.D{{"$inc",bson.D{{"like_count", 1}}},{"$push",bson.D{{"likes",userID}}}})
 
-func (br *BlogRepo) RemoveLike(blogID primitive.ObjectID, userID string) error {
-	return nil
+	if err != nil{
+		return  err
+	}
+	return  nil
 }
+func (Br *BlogRepo)RemoveLike(blogID primitive.ObjectID, userID string) error{
+	ctx, cancle := context.WithTimeout(context.Background(), 5 * time.Second)
+	defer cancle()
 
-func (br *BlogRepo) AddDislike(blogID primitive.ObjectID, userID string) error {
-	return nil
-}
+	_, err := Br.collection.UpdateOne(ctx,bson.D{{"_id",blogID}},bson.D{{"$inc",bson.D{{"like_count", -1}}},{"$pull",bson.D{{"likes",userID}}}})
 
-func (br *BlogRepo) RemoveDislike(blogID primitive.ObjectID, userID string) error {
-	return nil
-}
+	if err != nil{
+		return  err
+	}
+	return  nil
 
-func (br *BlogRepo) GetTagIDByName(name string) (primitive.ObjectID, error) {
-	return primitive.NilObjectID, nil
 }
+func (Br *BlogRepo) AddDislike(blogID primitive.ObjectID, userID string) error{
+	ctx, cancle := context.WithTimeout(context.Background(), 5 * time.Second)
+	defer cancle()
+
+	_, err := Br.collection.UpdateOne(ctx,bson.D{{"_id",blogID}},bson.D{{"$push",bson.D{{"dislikes",userID}}}})
+
+	if err != nil{
+		return  err
+	}
+	return  nil
+
+}
+func (Br * BlogRepo)RemoveDislike(blogID primitive.ObjectID, userID string) error{
+	ctx, cancle := context.WithTimeout(context.Background(), 5 * time.Second)
+	defer cancle()
+
+	_, err := Br.collection.UpdateOne(ctx,bson.D{{"_id",blogID}},bson.D{{"$pull",bson.D{{"dislikes",userID}}}})
+
+	if err != nil{
+		return  err
+	}
+	return  nil
+
+	}
+
+// func (br *BlogRepo) GetTagIDByName(name string) (primitive.ObjectID, error) {
+//  return primitive.NilObjectID, nil
+// }
